@@ -1,0 +1,35 @@
+# EC2 instance 1: prediction API + user-facing frontend
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    image: taxi-fare-api
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_SOURCE: ${MODEL_SOURCE:-wandb}
+      MODEL_LOCAL_PATH: /app/models/model.joblib
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+      WANDB_MODEL_REF: ${WANDB_MODEL_REF:-}
+      LOG_TO_DB: ${LOG_TO_DB:-true}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      DYNAMODB_TABLE: ${DYNAMODB_TABLE:-taxi-fare-predictions}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    volumes:
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: taxi-fare-frontend
+    ports:
+      - "8501:8501"
+    environment:
+      API_URL: ${API_URL:-http://api:8000}
+    depends_on:
+      - api
+    restart: unless-stopped

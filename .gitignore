@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+wandb/
+artifacts/
+*.parquet
+models/*.joblib
+.pytest_cache/
+.ruff_cache/
+.DS_Store

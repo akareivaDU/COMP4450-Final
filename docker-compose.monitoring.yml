@@ -1,0 +1,17 @@
+# EC2 instance 2: monitoring dashboard (reads DynamoDB, never talks to the API)
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: monitoring/Dockerfile
+    image: taxi-fare-dashboard
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    environment:
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      DYNAMODB_TABLE: ${DYNAMODB_TABLE:-taxi-fare-predictions}
+      MAE_ALERT_THRESHOLD: ${MAE_ALERT_THRESHOLD:-5.0}
+      MIN_FEEDBACK_FOR_ALERT: ${MIN_FEEDBACK_FOR_ALERT:-10}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    restart: unless-stopped
