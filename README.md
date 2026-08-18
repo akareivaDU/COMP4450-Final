@@ -59,8 +59,8 @@ Because fare prediction is a regression problem, the monitoring metrics are adap
 Requires Python 3.12 or newer, Docker, an AWS account, and a Weights & Biases account.
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/akareivaDU/COMP4450-Final.git
+cd COMP4450-Final
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -91,8 +91,8 @@ Either way this applies the cleaning rules in `common/features.py` and writes a 
 ### 2. Create the DynamoDB table
 
 ```bash
-export AWS_REGION=us-east-1
-python scripts/create_dynamodb_table.py --region us-east-1
+export AWS_REGION=us-east-2
+python scripts/create_dynamodb_table.py --region us-east-2
 ```
 
 The table uses `prediction_id` as its partition key and on-demand billing.
@@ -114,6 +114,8 @@ Compare the runs in the W&B dashboard and re-link the best one if a later run wi
 ```bash
 python -m training.train --learning-rate 0.05 --max-iter 500 --alias production
 ```
+
+The registry reference must not be prefixed with the entity name. `akareiva4-denver-university/wandb-registry-model/...` fails with "Unable to find organization for entity"; the bare collection path works because W&B resolves the organization from the API key.
 
 If your W&B account uses the older registry layout, pass the legacy path instead:
 
@@ -239,7 +241,9 @@ Create an IAM role for EC2 with a policy granting `dynamodb:PutItem`, `dynamodb:
 
 ### EC2 instance 1: API and frontend
 
-Launch an Amazon Linux 2023 t3.small instance, attach the IAM role, and open ports 22, 8000, and 8501 to your IP in the security group.
+Launch an Amazon Linux 2023 t3.small instance, attach the IAM role, and open ports 22, 8000, and 8501 to your IP in the security group. Use t3.small rather than t2.micro; 1 GB of memory is not enough to build the images.
+
+Install Docker and git:
 
 ```bash
 sudo dnf update -y
@@ -247,33 +251,88 @@ sudo dnf install -y docker git
 sudo systemctl enable --now docker
 sudo usermod -aG docker ec2-user
 newgrp docker
+```
 
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+Amazon Linux 2023 ships only the Docker engine, so the Compose and buildx plugins have to be installed separately. Without them `docker compose up --build` fails with "compose is not a docker command" and then "compose build requires buildx".
 
-cp .env.example .env
-nano .env    # set WANDB_API_KEY, WANDB_MODEL_REF, AWS_REGION, DYNAMODB_TABLE
+```bash
+sudo mkdir -p /usr/libexec/docker/cli-plugins
+sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+  -o /usr/libexec/docker/cli-plugins/docker-compose
+sudo curl -SL https://github.com/docker/buildx/releases/download/v0.36.1/buildx-v0.36.1.linux-amd64 \
+  -o /usr/libexec/docker/cli-plugins/docker-buildx
+sudo chmod +x /usr/libexec/docker/cli-plugins/docker-compose \
+  /usr/libexec/docker/cli-plugins/docker-buildx
+
+docker compose version
+docker buildx version
+```
+
+Then clone the repository and start the services:
+
+```bash
+git clone https://github.com/akareivaDU/COMP4450-Final.git
+cd COMP4450-Final
+
+cat > .env <<'ENV'
+MODEL_SOURCE=wandb
+WANDB_API_KEY=your-key-here
+WANDB_MODEL_REF=wandb-registry-model/taxi-fare-model:production
+LOG_TO_DB=true
+AWS_REGION=us-east-2
+DYNAMODB_TABLE=taxi-fare-predictions
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+API_URL=http://api:8000
+ENV
+nano .env    # replace your-key-here with the real W&B key
 
 docker compose up -d --build
 docker compose ps
 curl http://localhost:8000/health
 ```
 
+Leave `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` empty. boto3 picks up credentials from the attached IAM instance role, so no keys need to be stored on the server.
+
 ### EC2 instance 2: monitoring dashboard
 
-Launch a second instance the same way, attach the same IAM role, and open ports 22 and 8501.
+Launch a second Amazon Linux 2023 t3.small instance, attach the same IAM role, and open ports 22 and 8501. This instance does not need port 8000; it never talks to the API directly.
+
+Run the same Docker, git, and plugin installation steps as instance 1, then:
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/akareivaDU/COMP4450-Final.git
+cd COMP4450-Final
 
-cp .env.example .env
-nano .env    # set AWS_REGION and DYNAMODB_TABLE
+cat > .env <<'ENV'
+AWS_REGION=us-east-2
+DYNAMODB_TABLE=taxi-fare-predictions
+MAE_ALERT_THRESHOLD=5.0
+MIN_FEEDBACK_FOR_ALERT=10
+DASHBOARD_PORT=8501
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+ENV
 
 docker compose -f docker-compose.monitoring.yml up -d --build
+docker compose -f docker-compose.monitoring.yml ps
 ```
 
+No W&B credentials are needed here. The dashboard only reads prediction logs from DynamoDB and never loads the model.
+
 The dashboard is then reachable at `http://<instance-2-public-ip>:8501` and the frontend at `http://<instance-1-public-ip>:8501`.
+
+### Verifying the deployment
+
+Make a prediction on instance 1, either through the frontend or directly against the API:
+
+```bash
+curl -X POST http://<instance-1-public-ip>:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"trip_distance": 8.4, "passenger_count": 2, "pu_location_id": 132, "do_location_id": 230}'
+```
+
+A response with `"logged_to_db": true` confirms the IAM instance role reached DynamoDB. The prediction should then appear on the monitoring dashboard on instance 2 after clicking Refresh data, which demonstrates that the two instances exchange data only through the database.
 
 ## Environment variables
 
@@ -281,14 +340,24 @@ The dashboard is then reachable at `http://<instance-2-public-ip>:8501` and the 
 |---|---|---|---|
 | `MODEL_SOURCE` | API | `wandb` | `wandb` pulls from the registry, `local` reads a file |
 | `WANDB_API_KEY` | API | none | Authenticates the registry download |
-| `WANDB_MODEL_REF` | API | none | e.g. `org/wandb-registry-model/taxi-fare-model:production` |
+| `WANDB_MODEL_REF` | API | none | e.g. `wandb-registry-model/taxi-fare-model:production` |
 | `MODEL_LOCAL_PATH` | API | `models/model.joblib` | Fallback model file |
-| `AWS_REGION` | API, dashboard | `us-east-1` | DynamoDB region |
+| `AWS_REGION` | API, dashboard | `us-east-1` | DynamoDB region; this project uses `us-east-2` |
 | `DYNAMODB_TABLE` | API, dashboard | `taxi-fare-predictions` | Prediction log table |
 | `LOG_TO_DB` | API | `true` | Set to `false` to disable database writes |
 | `API_URL` | frontend | `http://api:8000` | Backend address |
 | `MAE_ALERT_THRESHOLD` | dashboard | `5.0` | MAE above this triggers the alert banner |
 | `MIN_FEEDBACK_FOR_ALERT` | dashboard | `10` | Minimum feedback count before alerting |
+
+## Deployment notes
+
+Amazon Linux 2023 installs only the Docker engine. The Compose and buildx CLI plugins must be added manually before `docker compose up --build` will work; see the deployment section above.
+
+Use t3.small or larger for the EC2 instances. A t2.micro has 1 GB of memory and gets out-of-memory killed while pip installs scikit-learn during the image build.
+
+The monitoring Dockerfile sets `PYTHONPATH=/app`. Streamlit puts the script's own directory on `sys.path` rather than the working directory, so without it `from common import db` fails with `ModuleNotFoundError` inside the container. The API is unaffected because uvicorn adds the working directory itself.
+
+Scripts that import from `common/` must be run as modules, for example `python -m data.download_data`, not `python data/download_data.py`. Running a script by path puts that script's directory on `sys.path` instead of the repository root.
 
 ## Notes
 
