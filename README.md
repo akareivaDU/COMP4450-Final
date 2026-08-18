@@ -405,3 +405,4 @@ The dashboard scans the whole DynamoDB table. That is fine at course-project vol
 ├── requirements-dev.txt
 └── ruff.toml
 ```
+
